@@ -520,8 +520,7 @@ impl ActiveRelayActor {
             home_relay = self.is_home_relay,
         );
 
-        let (mut client_stream, client_sink) = client.split();
-        let mut client_sink = client_sink.sink_map_err(|e| ClientStreamWriteSnafu.into_error(e));
+        let (mut client_stream, mut client_sink) = client.split();
 
         let mut state = ConnectedRelayState {
             ping_tracker: PingTracker::default(),
@@ -543,9 +542,13 @@ impl ActiveRelayActor {
 
         let res = loop {
             if let Some(data) = state.pong_pending.take() {
-                let fut = client_sink.send(ClientToRelayMsg::Pong(data));
-                self.run_sending(fut, &mut state, &mut client_stream)
-                    .await?;
+                self.run_sending(
+                    Some(ClientToRelayMsg::Pong(data)),
+                    &mut state,
+                    &mut client_stream,
+                    &mut client_sink,
+                )
+                .await?;
             }
             tokio::select! {
                 biased;
@@ -570,8 +573,7 @@ impl ActiveRelayActor {
                 }
                 _ = ping_interval.tick() => {
                     let data = state.ping_tracker.new_ping();
-                    let fut = client_sink.send(ClientToRelayMsg::Ping(data));
-                    self.run_sending(fut, &mut state, &mut client_stream).await?;
+                    self.run_sending(Some(ClientToRelayMsg::Ping(data)), &mut state, &mut client_stream, &mut client_sink).await?;
                 }
                 msg = self.inbox.recv() => {
                     let Some(msg) = msg else {
@@ -586,8 +588,7 @@ impl ActiveRelayActor {
                             match client_stream.local_addr() {
                                 Some(addr) if local_ips.contains(&addr.ip()) => {
                                     let data = state.ping_tracker.new_ping();
-                                    let fut = client_sink.send(ClientToRelayMsg::Ping(data));
-                                    self.run_sending(fut, &mut state, &mut client_stream).await?;
+                                    self.run_sending(Some(ClientToRelayMsg::Ping(data)), &mut state, &mut client_stream, &mut client_sink).await?;
                                 }
                                 Some(_) => break Err(LocalIpInvalidSnafu.build()),
                                 None => break Err(LocalAddrMissingSnafu.build()),
@@ -602,8 +603,7 @@ impl ActiveRelayActor {
                         ActiveRelayMessage::PingServer(sender) => {
                             let data = rand::random();
                             state.test_pong = Some((data, sender));
-                            let fut = client_sink.send(ClientToRelayMsg::Ping(data));
-                            self.run_sending(fut, &mut state, &mut client_stream).await?;
+                            self.run_sending(Some(ClientToRelayMsg::Ping(data)), &mut state, &mut client_stream, &mut client_sink).await?;
                         }
                     }
                 }
@@ -626,14 +626,12 @@ impl ActiveRelayActor {
                     let metrics = self.metrics.clone();
                     let packet_iter = batch.into_iter().map(|item| {
                         metrics.send_relay.inc_by(item.datagrams.contents.len() as _);
-                        Ok(ClientToRelayMsg::Datagrams {
+                        ClientToRelayMsg::Datagrams {
                             dst_node_id: item.remote_node,
                             datagrams: item.datagrams
-                        })
+                        }
                     });
-                    let mut packet_stream = n0_future::stream::iter(packet_iter);
-                    let fut = client_sink.send_all(&mut packet_stream);
-                    self.run_sending(fut, &mut state, &mut client_stream).await?;
+                    self.run_sending(packet_iter, &mut state, &mut client_stream, &mut client_sink).await?;
                 }
                 msg = client_stream.next() => {
                     let Some(msg) = msg else {
@@ -728,17 +726,24 @@ impl ActiveRelayActor {
     /// the actor should shut down, consult the [`ActiveRelayActor::stop_token`] and
     /// [`ActiveRelayActor::inactive_timeout`] for this, or the send was successful.
     #[instrument(name = "tx", skip_all)]
-    async fn run_sending<T>(
+    async fn run_sending(
         &mut self,
-        sending_fut: impl Future<Output = Result<T, RunError>>,
+        to_send: impl IntoIterator<Item = ClientToRelayMsg>,
         state: &mut ConnectedRelayState,
         client_stream: &mut iroh_relay::client::ClientStream,
+        client_sink: &mut iroh_relay::client::ClientSink,
     ) -> Result<(), RelayConnectionError> {
         // we use the same time as for our ping interval
         let send_timeout = PING_INTERVAL;
 
         let mut timeout = pin!(time::sleep(send_timeout));
-        let mut sending_fut = pin!(sending_fut);
+        let mut sending_fut = pin!(async move {
+            for item in to_send {
+                client_sink.feed(item).await?;
+            }
+            client_sink.flush().await?;
+            Ok(())
+        });
         let res = loop {
             tokio::select! {
                 biased;
@@ -763,7 +768,7 @@ impl ActiveRelayActor {
                 res = &mut sending_fut => {
                     match res {
                         Ok(_) => break Ok(()),
-                        Err(err) => break Err(err),
+                        Err(err) => break Err(ClientStreamWriteSnafu.into_error(err)),
                     }
                 }
                 _ = state.ping_tracker.timeout() => {
