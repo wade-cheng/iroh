@@ -226,10 +226,13 @@ impl ClientBuilder {
 
         debug!(%dial_url, "Dialing relay by websocket");
 
+        const BUFFER_CAPACITY: usize = 16 * 1024;
+
         #[allow(unused_mut)]
         let mut builder = MaybeTlsStreamBuilder::new(dial_url.clone(), self.dns_resolver.clone())
             .prefer_ipv6(self.prefer_ipv6())
-            .proxy_url(self.proxy_url.clone());
+            .proxy_url(self.proxy_url.clone())
+            .write_buffer_capacity(BUFFER_CAPACITY);
 
         #[cfg(any(test, feature = "test-utils"))]
         if self.insecure_skip_cert_verify {
@@ -239,6 +242,7 @@ impl ClientBuilder {
         let stream = builder.connect().await?;
         let local_addr = stream
             .as_ref()
+            .get_ref()
             .local_addr()
             .map_err(|_| NoLocalAddrSnafu.build())?;
         let mut builder = tokio_websockets::ClientBuilder::new()
@@ -249,7 +253,8 @@ impl ClientBuilder {
                 }
                 .build()
             })?
-            .limits(tokio_websockets::Limits::default().max_payload_len(Some(MAX_FRAME_SIZE)));
+            .limits(tokio_websockets::Limits::default().max_payload_len(Some(MAX_FRAME_SIZE)))
+            .config(tokio_websockets::Config::default().flush_threshold(usize::MAX));
         if let Some(client_auth) = KeyMaterialClientAuth::new(&self.secret_key, &stream) {
             debug!("Using TLS key export for relay client authentication");
             builder = builder

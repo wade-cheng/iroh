@@ -13,6 +13,7 @@ use hyper::{upgrade::Parts, Request};
 use n0_future::{task, time};
 use rustls::client::Resumption;
 use snafu::{OptionExt, ResultExt};
+use tokio::io::BufWriter;
 
 use super::{
     streams::{MaybeTlsStream, ProxyStream},
@@ -24,6 +25,7 @@ use crate::defaults::timeouts::*;
 pub struct MaybeTlsStreamBuilder {
     url: Url,
     dns_resolver: DnsResolver,
+    write_buffer_capacity: usize,
     proxy_url: Option<Url>,
     prefer_ipv6: bool,
     #[cfg(any(test, feature = "test-utils"))]
@@ -35,6 +37,7 @@ impl MaybeTlsStreamBuilder {
         Self {
             url,
             dns_resolver,
+            write_buffer_capacity: 8 * 1024,
             proxy_url: None,
             prefer_ipv6: false,
             #[cfg(any(test, feature = "test-utils"))]
@@ -52,13 +55,18 @@ impl MaybeTlsStreamBuilder {
         self
     }
 
+    pub fn write_buffer_capacity(mut self, write_buffer_capacity: usize) -> Self {
+        self.write_buffer_capacity = write_buffer_capacity;
+        self
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub fn insecure_skip_cert_verify(mut self, skip: bool) -> Self {
         self.insecure_skip_cert_verify = skip;
         self
     }
 
-    pub async fn connect(self) -> Result<MaybeTlsStream<ProxyStream>, ConnectError> {
+    pub async fn connect(self) -> Result<MaybeTlsStream<BufWriter<ProxyStream>>, ConnectError> {
         let roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
@@ -86,6 +94,8 @@ impl MaybeTlsStreamBuilder {
             .map_err(|_| NoLocalAddrSnafu.build())?;
 
         debug!(server_addr = ?tcp_stream.peer_addr(), %local_addr, "TCP stream connected");
+
+        let tcp_stream = BufWriter::with_capacity(self.write_buffer_capacity, tcp_stream);
 
         if self.use_tls() {
             debug!("Starting TLS handshake");

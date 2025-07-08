@@ -49,6 +49,7 @@ pub mod dns;
 pub mod node_info;
 
 pub use protos::relay::MAX_PACKET_SIZE;
+use tokio::io::{AsyncWrite, BufWriter};
 
 pub use self::{
     ping_tracker::PingTracker,
@@ -63,4 +64,16 @@ pub(crate) trait ExportKeyingMaterial {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Option<T>;
+}
+
+impl<IO: ExportKeyingMaterial + AsyncWrite> ExportKeyingMaterial for BufWriter<IO> {
+    fn export_keying_material<T: AsMut<[u8]>>(
+        &self,
+        output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Option<T> {
+        self.get_ref()
+            .export_keying_material(output, label, context)
+    }
 }

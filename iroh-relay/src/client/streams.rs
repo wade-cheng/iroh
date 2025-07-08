@@ -74,6 +74,13 @@ impl AsyncWrite for ProxyStream {
             Self::Proxied(stream) => Pin::new(stream.get_mut().1).poll_write_vectored(cx, bufs),
         }
     }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Raw(stream) => stream.is_write_vectored(),
+            Self::Proxied(stream) => stream.get_ref().1.is_write_vectored(),
+        }
+    }
 }
 
 impl ProxyStream {
@@ -180,6 +187,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<IO> {
             Self::Tls(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             #[cfg(test)]
             Self::Test(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Raw(s) => s.is_write_vectored(),
+            Self::Tls(s) => s.is_write_vectored(),
+            #[cfg(test)]
+            Self::Test(s) => s.is_write_vectored(),
         }
     }
 }

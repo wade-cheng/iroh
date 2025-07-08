@@ -12,6 +12,7 @@ use iroh_base::SecretKey;
 use n0_future::{Sink, Stream};
 use nested_enum_utils::common_fields;
 use snafu::{Backtrace, Snafu};
+use tokio::io::BufWriter;
 use tracing::debug;
 
 use super::KeyCache;
@@ -78,7 +79,7 @@ pub enum RecvError {
 pub(crate) struct Conn {
     #[debug("tokio_websockets::WebSocketStream")]
     #[cfg(not(wasm_browser))]
-    pub(crate) conn: WsBytesFramed<MaybeTlsStream<ProxyStream>>,
+    pub(crate) conn: WsBytesFramed<MaybeTlsStream<BufWriter<ProxyStream>>>,
     #[debug("ws_stream_wasm::WsStream")]
     #[cfg(wasm_browser)]
     pub(crate) conn: WsBytesFramed,
@@ -104,7 +105,7 @@ impl Conn {
     /// Constructs a new websocket connection, including the initial server handshake.
     pub(crate) async fn new(
         #[cfg(not(wasm_browser))] io: tokio_websockets::WebSocketStream<
-            MaybeTlsStream<ProxyStream>,
+            MaybeTlsStream<BufWriter<ProxyStream>>,
         >,
         #[cfg(wasm_browser)] io: ws_stream_wasm::WsStream,
         key_cache: KeyCache,
